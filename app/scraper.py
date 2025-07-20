@@ -18,13 +18,15 @@ MAX_SCRAPES_PER_DOMAIN = 3  # Adjust as needed
 scrape_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCRAPES)
 domain_scrape_counts = defaultdict(int)
 
+MIN_WORDS = 500  # Minimum word count for valid content
+
 def get_domain(url):
     return urlparse(url).netloc
 
 def clean_html(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     # Remove unwanted elements by tag
-    for selector in ["nav", "footer", "header", "aside", "form", "script", "style", "noscript"]:
+    for selector in ["nav", "footer", "header", "aside", "form", "script", "style", "noscript", "iframe"]:
         for tag in soup.find_all(selector):
             tag.decompose()
     # Remove elements by common class/id keywords
@@ -123,6 +125,14 @@ async def scrape_dynamic(url: str, retries=2, delay=5) -> str:
                     continue
                 raise Exception(str(e))
 
+def content_quality_check(text: str) -> str:
+    if not text or len(text.strip()) == 0:
+        return "No content extracted"
+    words = text.split()
+    if len(words) < MIN_WORDS:
+        return f"Content too short: {len(words)} words (min {MIN_WORDS})"
+    return None  # None means content is valid
+
 async def extract_text_from_url(url: str) -> str:
     domain = get_domain(url)
     if domain_scrape_counts[domain] >= MAX_SCRAPES_PER_DOMAIN:
@@ -145,13 +155,25 @@ async def extract_texts_from_urls(urls: list) -> list:
     tasks = []
     for url in urls:
         tasks.append(_extract_text_with_result(url))
-    return await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks)
+    # Add summary
+    summary = {
+        "total": len(urls),
+        "success": sum(1 for r in results if "text" in r and r["text"]),
+        "failed": sum(1 for r in results if "error" in r),
+    }
+    return {"summary": summary, "results": results}
 
 async def _extract_text_with_result(url):
     result = {"url": url}
     try:
         text = await extract_text_from_url(url)
-        result["text"] = text
+        # Content quality check
+        quality_error = content_quality_check(text)
+        if quality_error:
+            result["error"] = quality_error
+        else:
+            result["text"] = text
     except Exception as e:
         result["error"] = str(e)
     return result
